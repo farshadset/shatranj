@@ -8,6 +8,39 @@ import { createRoom, fetchRoom, joinRoom, makeMove, offerDraw, offerRematch, acc
 import { ChatMessage, PlayerColor, RoomSession, RoomSnapshot, RoomStatus } from '@/lib/chess/types'
 import { PROFILE_USERNAME_STORAGE_KEY } from '@/lib/profile/constants'
 
+const recordedGameResults = new Set<string>()
+
+function recordGameResultIfRanked(snapshot: RoomSnapshot, session: RoomSession): void {
+  if (recordedGameResults.has(snapshot.roomId)) return
+  recordedGameResults.add(snapshot.roomId)
+  const searchParams = new URLSearchParams(window.location.search)
+  if (searchParams.get('mode') !== 'ranked') return
+  if (snapshot.status === 'active' || snapshot.status === 'waiting') return
+
+  const username = localStorage.getItem(PROFILE_USERNAME_STORAGE_KEY)?.trim()
+  if (!username) return
+
+  let result: 'win' | 'loss' | 'draw'
+  if (snapshot.status === 'draw') {
+    result = 'draw'
+  } else if (snapshot.winner === session.color) {
+    result = 'win'
+  } else if (snapshot.winner && snapshot.winner !== session.color) {
+    result = 'loss'
+  } else {
+    return
+  }
+
+  const timeControlMinutes = Math.round(snapshot.timeControlMs / 60_000)
+  const incrementSeconds = Math.round(snapshot.incrementMs / 1_000)
+
+  fetch('/api/profile/game-stats', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username, result, timeControlMinutes, incrementSeconds }),
+  }).catch(() => {})
+}
+
 function formatTimer(ms: number): string {
   const clampedMs = Math.max(0, Math.floor(ms))
   const totalSeconds = Math.floor(clampedMs / 1000)
@@ -391,6 +424,7 @@ export function ChessRoom() {
           setSnapshot(nextSnapshot)
           // Show game over modal when game ends
           if (nextSnapshot.status !== 'active' && nextSnapshot.status !== 'waiting') {
+            recordGameResultIfRanked(nextSnapshot, sessionRef.current!)
             setGameOverModalOpen(true)
           }
           // Hide searching overlay when game becomes active

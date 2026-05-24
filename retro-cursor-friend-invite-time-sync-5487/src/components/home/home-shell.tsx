@@ -1,10 +1,11 @@
 'use client'
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { useRouter } from 'next/navigation'
+import { useRouter, useSearchParams } from 'next/navigation'
 import { createRoom, joinRoom, roomEventsUrl } from '@/lib/chess/client'
 import type { RoomSession, RoomSnapshot } from '@/lib/chess/types'
 import { PROFILE_USERNAME_STORAGE_KEY } from '@/lib/profile/constants'
+import { Toast } from '@/components/ui/toast'
 
 type FooterTab = 'home' | 'profile' | 'puzzle' | 'news'
 type ProfileMode = 'login' | 'register'
@@ -47,7 +48,8 @@ interface GameInviteItem {
 
 interface FooterItem {
   id: FooterTab
-  label: string
+  icon: string
+  rotate?: string
 }
 
 interface OnlineTimeControlOption {
@@ -96,10 +98,10 @@ interface GameInviteApiResponse {
 }
 
 const FOOTER_ITEMS: FooterItem[] = [
-  { id: 'home', label: 'خانه' },
-  { id: 'profile', label: 'پروفایل' },
-  { id: 'puzzle', label: 'پازل' },
-  { id: 'news', label: 'اخبار' },
+  { id: 'home', icon: '/icons/footer/home.png' },
+  { id: 'profile', icon: '/icons/footer/profile.png' },
+  { id: 'puzzle', icon: '/icons/footer/pazel.png', rotate: 'rotate-90' },
+  { id: 'news', icon: '/icons/footer/news.png' },
 ]
 
 const CHESS_SESSION_STORAGE_KEY = 'realtime-chess-session'
@@ -158,6 +160,16 @@ function PencilIcon() {
         d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25Zm17.71-10.04a1.003 1.003 0 0 0 0-1.42l-2.5-2.5a1.003 1.003 0 0 0-1.42 0l-1.96 1.96 3.75 3.75 2.13-2.79Z"
         fill="currentColor"
       />
+    </svg>
+  )
+}
+
+function KebabIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true" className="h-5 w-5" fill="currentColor">
+      <circle cx="12" cy="5" r="2" />
+      <circle cx="12" cy="12" r="2" />
+      <circle cx="12" cy="19" r="2" />
     </svg>
   )
 }
@@ -489,13 +501,6 @@ interface ProfileContentProps {
   isEditingUsername: boolean
   onToggleUsernameEdit: () => void
   onSaveUsername: () => void
-  currentPassword: string
-  onCurrentPasswordChange: (value: string) => void
-  newPassword: string
-  onNewPasswordChange: (value: string) => void
-  confirmNewPassword: string
-  onConfirmNewPasswordChange: (value: string) => void
-  onChangePassword: () => void
   friends: string[]
   incomingRequests: string[]
   outgoingRequests: string[]
@@ -516,9 +521,11 @@ interface ProfileContentProps {
   onPlayAsGuest: () => void
   isStartingOnline: boolean
   friendsLoading: boolean
+  avatar: string
 }
 
 function ProfileContent(props: ProfileContentProps) {
+  const router = useRouter()
   const {
     isAuthenticated,
     mode,
@@ -537,13 +544,6 @@ function ProfileContent(props: ProfileContentProps) {
     isEditingUsername,
     onToggleUsernameEdit,
     onSaveUsername,
-    currentPassword,
-    onCurrentPasswordChange,
-    newPassword,
-    onNewPasswordChange,
-    confirmNewPassword,
-    onConfirmNewPasswordChange,
-    onChangePassword,
     friends,
     incomingRequests,
     outgoingRequests,
@@ -566,105 +566,117 @@ function ProfileContent(props: ProfileContentProps) {
     friendsLoading,
   } = props
 
+  const [isKebabOpen, setIsKebabOpen] = useState(false)
+  const [totalPlayedGames, setTotalPlayedGames] = useState(0)
+
+  useEffect(() => {
+    if (!profileName.trim()) return
+    fetch('/api/profile/game-stats?username=' + encodeURIComponent(profileName.trim()))
+      .then(res => res.json())
+      .then(data => {
+        if (data.gameStats?.total?.played !== undefined) {
+          setTotalPlayedGames(data.gameStats.total.played)
+        }
+      })
+      .catch(() => {})
+  }, [profileName])
+
+  const onToggleKebab = useCallback(() => {
+    setIsKebabOpen(prev => !prev)
+  }, [])
+
   const isRegisterMode = mode === 'register'
 
   if (isAuthenticated) {
     return (
       <section className="w-full max-w-md space-y-4 rounded-2xl border border-slate-700 bg-slate-900/70 p-5 shadow-lg">
         <div className="flex items-center justify-between">
-          <h2 className="text-xl font-bold text-slate-100">پروفایل من</h2>
-          <button
-            type="button"
-            onClick={onLogout}
-            data-testid="profile-logout-btn"
-            className="rounded-md border border-rose-400/60 px-3 py-1.5 text-xs font-semibold text-rose-200 transition hover:bg-rose-500/10"
-          >
-            خروج
-          </button>
-        </div>
-
-        <div className="space-y-2 rounded-xl border border-slate-700 bg-slate-950/70 p-4">
-          <p className="text-xs text-slate-400">نام کاربری</p>
-          <div className="flex items-center gap-2">
-            {isEditingUsername ? (
+          <div className="relative">
+            <button
+              type="button"
+              onClick={onToggleKebab}
+              data-testid="profile-kebab-btn"
+              className="inline-flex items-center justify-center rounded-lg border border-slate-600 p-2 text-slate-200 transition hover:bg-slate-800"
+              aria-label="منوی بیشتر"
+            >
+              <KebabIcon />
+            </button>
+            {isKebabOpen && (
               <>
-                <input
-                  value={usernameEditValue}
-                  onChange={(event) => onUsernameEditValueChange(event.target.value)}
-                  data-testid="profile-username-edit-input"
-                  className="flex-1 rounded-lg border border-slate-600 bg-slate-900 px-3 py-2 text-sm text-slate-100 outline-none ring-cyan-400 transition focus:ring-2"
-                  placeholder="نام کاربری جدید"
+                <div
+                  className="fixed inset-0 z-10"
+                  onClick={onToggleKebab}
                 />
-                <button
-                  type="button"
-                  onClick={onSaveUsername}
-                  disabled={isSubmitting}
-                  data-testid="profile-username-save-btn"
-                  className="rounded-lg bg-cyan-400 px-3 py-2 text-xs font-bold text-slate-950 disabled:cursor-not-allowed disabled:opacity-60"
-                >
-                  ذخیره
-                </button>
-              </>
-            ) : (
-              <>
-                <p className="flex-1 text-sm font-semibold text-slate-100" data-testid="profile-username-value">
-                  {profileName}
-                </p>
-                <button
-                  type="button"
-                  onClick={onToggleUsernameEdit}
-                  data-testid="profile-username-edit-btn"
-                  className="inline-flex items-center justify-center rounded-lg border border-slate-600 p-2 text-slate-200 transition hover:bg-slate-800"
-                  aria-label="ویرایش نام کاربری"
-                >
-                  <PencilIcon />
-                </button>
+                <div className="absolute right-0 top-full mt-2 z-20 w-48 overflow-hidden rounded-xl border border-slate-600 bg-slate-900 shadow-xl">
+                  <div className="flex flex-col">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        onToggleKebab()
+                        router.push('/profile/edit')
+                      }}
+                      data-testid="profile-kebab-edit-btn"
+                      className="flex w-full items-center gap-3 px-4 py-3 text-sm font-medium text-slate-100 transition hover:bg-slate-800"
+                    >
+                      <PencilIcon />
+                      ویرایش پروفایل
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        onToggleKebab()
+                        router.push('/profile/change-password')
+                      }}
+                      data-testid="profile-kebab-password-btn"
+                      className="flex w-full items-center gap-3 px-4 py-3 text-sm font-medium text-slate-100 transition hover:bg-slate-800"
+                    >
+                      <svg viewBox="0 0 24 24" aria-hidden="true" className="h-4 w-4" fill="currentColor">
+                        <path d="M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2Zm-6 9c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2Zm3.1-9H8.9V6c0-1.71 1.39-3.1 3.1-3.1s3.1 1.39 3.1 3.1v2Z" />
+                      </svg>
+                      تغییر رمز عبور
+                    </button>
+                    <div className="border-t border-slate-700" />
+                    <button
+                      type="button"
+                      onClick={() => {
+                        onToggleKebab()
+                        onLogout()
+                      }}
+                      data-testid="profile-kebab-logout-btn"
+                      className="flex w-full items-center gap-3 px-4 py-3 text-sm font-medium text-rose-300 transition hover:bg-slate-800"
+                    >
+                      <svg viewBox="0 0 24 24" aria-hidden="true" className="h-4 w-4" fill="currentColor">
+                        <path d="M17 7l-1.41 1.41L18.17 11H8v2h10.17l-2.58 2.58L17 17l5-5zM4 5h8V3H4c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h8v-2H4V5Z" />
+                      </svg>
+                      خروج از حساب
+                    </button>
+                  </div>
+                </div>
               </>
             )}
           </div>
+          <div className="flex items-center gap-3">
+            <span className="text-lg font-bold text-slate-100">{profileName}</span>
+            <div className="flex h-12 w-12 items-center justify-center overflow-hidden rounded-full border-2 border-slate-500 bg-slate-800">
+              {props.avatar ? (
+                <img src={props.avatar} alt="تصویر پروفایل" className="h-full w-full object-cover" />
+              ) : (
+                <img src="/icons/logo/logo.png" alt="لوگو" className="h-full w-full object-cover" />
+              )}
+            </div>
+          </div>
         </div>
 
-        <div className="space-y-3 rounded-xl border border-slate-700 bg-slate-950/70 p-4">
-          <p className="text-sm font-semibold text-slate-200">تغییر رمز عبور</p>
-          <label className="block space-y-2">
-            <span className="text-xs text-slate-400">رمز عبور فعلی</span>
-            <input
-              type="password"
-              value={currentPassword}
-              onChange={(event) => onCurrentPasswordChange(event.target.value)}
-              data-testid="profile-current-password-input"
-              className="w-full rounded-lg border border-slate-600 bg-slate-900 px-3 py-2 text-sm text-slate-100 outline-none ring-cyan-400 transition focus:ring-2"
-            />
-          </label>
-          <label className="block space-y-2">
-            <span className="text-xs text-slate-400">رمز عبور جدید</span>
-            <input
-              type="password"
-              value={newPassword}
-              onChange={(event) => onNewPasswordChange(event.target.value)}
-              data-testid="profile-new-password-input"
-              className="w-full rounded-lg border border-slate-600 bg-slate-900 px-3 py-2 text-sm text-slate-100 outline-none ring-cyan-400 transition focus:ring-2"
-            />
-          </label>
-          <label className="block space-y-2">
-            <span className="text-xs text-slate-400">تکرار رمز عبور جدید</span>
-            <input
-              type="password"
-              value={confirmNewPassword}
-              onChange={(event) => onConfirmNewPasswordChange(event.target.value)}
-              data-testid="profile-confirm-new-password-input"
-              className="w-full rounded-lg border border-slate-600 bg-slate-900 px-3 py-2 text-sm text-slate-100 outline-none ring-cyan-400 transition focus:ring-2"
-            />
-          </label>
-          <button
-            type="button"
-            onClick={onChangePassword}
-            disabled={isSubmitting}
-            data-testid="profile-change-password-btn"
-            className="w-full rounded-lg bg-cyan-400 px-4 py-2 text-sm font-bold text-slate-950 transition hover:bg-cyan-300 disabled:cursor-not-allowed disabled:opacity-60"
-          >
-            تغییر رمز عبور
-          </button>
+        <div className="flex items-center justify-center gap-6 py-3">
+          <div className="flex flex-col items-center gap-1">
+            <img src="/icons/games.png" alt="games" className="h-24 w-24 object-contain" />
+            <span className="text-[10px] text-slate-400">بازی‌ها</span>
+            <span className="text-xs font-bold text-slate-300">{totalPlayedGames.toLocaleString('fa-IR')}</span>
+          </div>
+          <div className="flex flex-col items-center gap-1">
+            <img src="/icons/footer/pazel.png" alt="puzzle" className="h-24 w-24 rotate-90" />
+            <span className="text-[10px] text-slate-400">پازل</span>
+          </div>
         </div>
 
         <div className="space-y-3 rounded-xl border border-slate-700 bg-slate-950/70 p-4">
@@ -1059,7 +1071,14 @@ function NewsContent({
 
 export function HomeShell() {
   const router = useRouter()
+  const searchParams = useSearchParams()
   const [activeTab, setActiveTab] = useState<FooterTab>('home')
+  useEffect(() => {
+    const tab = searchParams.get('tab')
+    if (tab === 'profile') {
+      setActiveTab('profile')
+    }
+  }, [searchParams])
   const [activeNewsSection, setActiveNewsSection] = useState<NewsSection>('news')
   const [profileMode, setProfileMode] = useState<ProfileMode>('login')
   const [activePanel, setActivePanel] = useState<ProfilePanel>('friends')
@@ -1072,9 +1091,6 @@ export function HomeShell() {
   const [confirmPassword, setConfirmPassword] = useState('')
   const [usernameEditValue, setUsernameEditValue] = useState('')
   const [isEditingUsername, setIsEditingUsername] = useState(false)
-  const [currentPassword, setCurrentPassword] = useState('')
-  const [newPassword, setNewPassword] = useState('')
-  const [confirmNewPassword, setConfirmNewPassword] = useState('')
   const [friends, setFriends] = useState<string[]>([])
   const [incomingRequests, setIncomingRequests] = useState<string[]>([])
   const [outgoingRequests, setOutgoingRequests] = useState<string[]>([])
@@ -1091,12 +1107,14 @@ export function HomeShell() {
   const [selectedInviteFriendUsername, setSelectedInviteFriendUsername] = useState('')
   const [selectedInviteTimeControlId, setSelectedInviteTimeControlId] = useState<string>(FRIEND_INVITE_TIME_OPTIONS[0]?.id ?? '10-2')
   const [bannerMessage, setBannerMessage] = useState<string | null>(null)
+  const [toastType, setToastType] = useState<'info' | 'success' | 'error'>('info')
   const [isStartingOnline, setIsStartingOnline] = useState(false)
   const [isFindingOpponent, setIsFindingOpponent] = useState(false)
   const [matchmakingRoomId, setMatchmakingRoomId] = useState<string | null>(null)
   const [matchmakingSession, setMatchmakingSession] = useState<RoomSession | null>(null)
   const [matchmakingStatusMessage, setMatchmakingStatusMessage] = useState<string | null>(null)
   const [matchmakingError, setMatchmakingError] = useState<string | null>(null)
+  const [avatar, setAvatar] = useState('')
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [storageReady, setStorageReady] = useState(false)
   const matchmakingEventSourceRef = useRef<EventSource | null>(null)
@@ -1148,6 +1166,7 @@ export function HomeShell() {
     setHomePanel('menu')
     setActivePanel('friends')
     setFriendSearchQuery('')
+    setAvatar('')
     setFriendSearchResults([])
     setIsGuestMode(false)
     if (message) {
@@ -1181,7 +1200,7 @@ export function HomeShell() {
             matchmakingTimeoutRef.current = window.setTimeout(() => {
               matchmakingTimeoutRef.current = null
               clearMatchmaking({ removeSession: false })
-              router.push(`/online?room=${roomId}`)
+              router.push(`/online?room=${roomId}&mode=ranked`)
             }, 700)
           }
         } catch {
@@ -1349,10 +1368,24 @@ export function HomeShell() {
       setIsInviteModalOpen(false)
       setSelectedInviteFriendUsername('')
       setHomePanel('menu')
+      setAvatar('')
       return
     }
     void loadFriendsOverview(profileName, true)
     void loadNotifications(profileName, true)
+
+    async function loadProfile() {
+      try {
+        const res = await fetch('/api/profile?action=get-profile&username=' + encodeURIComponent(profileName.trim()))
+        const data = await res.json()
+        if (data.user?.avatar) {
+          setAvatar(data.user.avatar)
+        }
+      } catch {
+        // ignore
+      }
+    }
+    void loadProfile()
   }, [isAuthenticated, loadFriendsOverview, loadNotifications, profileName])
 
   useEffect(() => {
@@ -1427,7 +1460,7 @@ export function HomeShell() {
       )
 
       if (response.snapshot.status === 'active') {
-        router.push(`/online?room=${response.snapshot.roomId}`)
+        router.push(`/online?room=${response.snapshot.roomId}&mode=ranked`)
         return
       }
 
@@ -1750,53 +1783,7 @@ export function HomeShell() {
     }
   }
 
-  const handleChangePassword = async () => {
-    if (!profileName.trim()) {
-      setBannerMessage('ابتدا وارد حساب کاربری شوید.')
-      return
-    }
-    if (!currentPassword) {
-      setBannerMessage('رمز عبور فعلی را وارد کنید.')
-      return
-    }
-    if (newPassword.length < 6) {
-      setBannerMessage('رمز عبور جدید باید حداقل ۶ کاراکتر باشد.')
-      return
-    }
-    if (newPassword !== confirmNewPassword) {
-      setBannerMessage('تکرار رمز عبور جدید با هم یکسان نیست.')
-      return
-    }
 
-    setIsSubmitting(true)
-    setBannerMessage(null)
-    try {
-      const response = await fetch('/api/profile?action=changePassword', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          username: profileName.trim(),
-          currentPassword,
-          newPassword,
-          confirmNewPassword,
-        }),
-      })
-      const payload = await parseJsonSafe(response)
-      if (!response.ok) {
-        setBannerMessage(payload.error?.message ?? 'تغییر رمز عبور انجام نشد.')
-        return
-      }
-
-      setCurrentPassword('')
-      setNewPassword('')
-      setConfirmNewPassword('')
-      setBannerMessage('رمز عبور با موفقیت تغییر کرد.')
-    } catch {
-      setBannerMessage('خطا در ارتباط با سرور پروفایل.')
-    } finally {
-      setIsSubmitting(false)
-    }
-  }
 
   const handleSendFriendRequest = async (targetUsername: string) => {
     const fromUsername = profileName.trim()
@@ -1968,26 +1955,21 @@ export function HomeShell() {
     }
   }
 
+  const handleToastClose = useCallback(() => {
+    setBannerMessage(null)
+  }, [])
+
   const handleLogout = () => {
     clearAuthState('با موفقیت از حساب کاربری خارج شدید.')
     setProfileMode('login')
     setPassword('')
     setConfirmPassword('')
-    setCurrentPassword('')
-    setNewPassword('')
-    setConfirmNewPassword('')
   }
 
   return (
     <main className="flex min-h-screen flex-col bg-gradient-to-b from-slate-950 to-slate-900 text-slate-100" dir="rtl">
       <div className="flex flex-1 items-center justify-center px-4 py-8">
         <div className="w-full max-w-md space-y-4">
-          {bannerMessage ? (
-            <p className="rounded-lg bg-cyan-500/10 px-4 py-3 text-center text-sm text-cyan-100" data-testid="home-banner-message">
-              {bannerMessage}
-            </p>
-          ) : null}
-
           {activeTab === 'home' ? (
             isFindingOpponent ? (
               <section className="rounded-2xl border border-cyan-400/30 bg-slate-900/90 p-6 text-center shadow-xl">
@@ -2065,13 +2047,6 @@ export function HomeShell() {
                 setUsernameEditValue(profileName)
               }}
               onSaveUsername={handleSaveUsername}
-              currentPassword={currentPassword}
-              onCurrentPasswordChange={setCurrentPassword}
-              newPassword={newPassword}
-              onNewPasswordChange={setNewPassword}
-              confirmNewPassword={confirmNewPassword}
-              onConfirmNewPasswordChange={setConfirmNewPassword}
-              onChangePassword={handleChangePassword}
               friends={friends}
               incomingRequests={incomingRequests}
               outgoingRequests={outgoingRequests}
@@ -2092,6 +2067,7 @@ export function HomeShell() {
               onPlayAsGuest={handlePlayAsGuest}
               isStartingOnline={isStartingOnline}
               friendsLoading={friendsLoading}
+              avatar={avatar}
             />
           ) : null}
 
@@ -2166,16 +2142,22 @@ export function HomeShell() {
                 }}
                 data-testid={`footer-tab-${item.id}`}
                 className={[
-                  'rounded-xl px-3 py-3 text-sm font-bold transition',
-                  isActive ? 'bg-cyan-400 text-slate-950' : 'bg-slate-800 text-slate-200 hover:bg-slate-700',
+                  'flex items-center justify-center rounded-xl p-3 transition',
+                  isActive ? 'bg-cyan-400' : 'bg-slate-800 hover:bg-slate-700',
                 ].join(' ')}
               >
-                {item.label}
+                <img src={item.icon} alt={item.id} className={['h-12 w-12', item.rotate].filter(Boolean).join(' ')} />
               </button>
             )
           })}
         </nav>
       </footer>
+
+      <Toast
+        message={bannerMessage}
+        onClose={handleToastClose}
+        type={toastType}
+      />
     </main>
   )
 }

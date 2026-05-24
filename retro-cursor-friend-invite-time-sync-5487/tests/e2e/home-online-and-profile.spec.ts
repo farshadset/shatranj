@@ -456,4 +456,58 @@ test.describe('Home actions and profile registration', () => {
 
     await secondContext.close()
   })
+
+  test('game stats API records and returns total games count', async ({ page }) => {
+    const seed = Date.now()
+    const username = `statsuser-${seed}`
+    const password = 'secret123'
+
+    await page.goto('/')
+    await page.evaluate(() => localStorage.clear())
+    await page.reload()
+
+    // Register user
+    await page.getByTestId('footer-tab-profile').click()
+    await page.getByTestId('profile-mode-register').click()
+    await page.getByTestId('profile-name-input').fill(username)
+    await page.getByTestId('profile-password-input').fill(password)
+    await page.getByTestId('profile-confirm-password-input').fill(password)
+    await page.getByTestId('profile-register-btn').click()
+    await expect(page.getByTestId('profile-username-value')).toContainText(username)
+
+    // Verify initial games count shows 0
+    await page.getByTestId('footer-tab-home').click()
+    await page.getByTestId('footer-tab-profile').click()
+    await expect(page.getByText('۰')).toBeVisible()
+
+    // Record 3 game results via API
+    for (let i = 0; i < 3; i++) {
+      const result = i === 0 ? 'win' : i === 1 ? 'loss' : 'draw'
+      const response = await page.request.post('/api/profile/game-stats', {
+        data: {
+          username,
+          result,
+          timeControlMinutes: 3,
+          incrementSeconds: 2,
+        },
+      })
+      await expect(response.ok()).toBeTruthy()
+      // Verify API response
+      const body = await response.json()
+      expect(body.gameStats.total.played).toBe(i + 1)
+    }
+
+    // Reload page and check the count persists
+    await page.reload()
+    await page.getByTestId('footer-tab-profile').click()
+    // Login again since we cleared localStorage
+    await page.getByTestId('profile-mode-login').click()
+    await page.getByTestId('profile-name-input').fill(username)
+    await page.getByTestId('profile-password-input').fill(password)
+    await page.getByTestId('profile-login-btn').click()
+    await expect(page.getByTestId('profile-username-value')).toContainText(username)
+
+    // Check total games shows 3 (in Persian numerals)
+    await expect(page.getByText('۳')).toBeVisible()
+  })
 })

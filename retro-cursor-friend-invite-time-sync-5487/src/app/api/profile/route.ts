@@ -23,8 +23,11 @@ type ProfileAction =
   | 'login'
   | 'friends'
   | 'search-users'
+  | 'check-username'
   | 'update-username'
   | 'change-password'
+  | 'update-profile'
+  | 'get-profile'
   | 'friend-request'
   | 'friend-respond'
   | 'friend-cancel-request'
@@ -45,8 +48,11 @@ function normalizeAction(action: string): ProfileAction | null {
   if (normalized === 'login') return 'login'
   if (normalized === 'friends' || normalized === 'friendsOverview') return 'friends'
   if (normalized === 'search-users' || normalized === 'searchUsers') return 'search-users'
+  if (normalized === 'check-username' || normalized === 'checkUsername') return 'check-username'
   if (normalized === 'update-username' || normalized === 'updateUsername') return 'update-username'
   if (normalized === 'change-password' || normalized === 'changePassword') return 'change-password'
+  if (normalized === 'update-profile' || normalized === 'updateProfile') return 'update-profile'
+  if (normalized === 'get-profile' || normalized === 'getProfile') return 'get-profile'
   if (normalized === 'friend-request' || normalized === 'friendRequest' || normalized === 'sendFriendRequest') {
     return 'friend-request'
   }
@@ -225,6 +231,19 @@ export async function GET(request: Request): Promise<Response> {
       return Response.json(result, { status: 200 })
     }
 
+    if (action === 'get-profile') {
+      const username = searchParams.get('username') ?? ''
+      const user = getUserStore().getUserProfile({ username })
+      return Response.json({ user }, { status: 200 })
+    }
+
+    if (action === 'check-username') {
+      const username = searchParams.get('username') ?? ''
+      const currentUsername = searchParams.get('currentUsername') ?? ''
+      const result = getUserStore().checkUsername({ username, currentUsername })
+      return Response.json(result, { status: 200 })
+    }
+
     return badRequest('مقدار action نامعتبر است.')
   } catch (error: unknown) {
     const apiError = asProfileApiError(error)
@@ -288,6 +307,19 @@ export async function POST(request: Request): Promise<Response> {
         currentPassword: (body.currentPassword as string | undefined) ?? '',
         nextPassword: (body.newPassword as string | undefined) ?? '',
         confirmNextPassword: (body.confirmNewPassword as string | undefined) ?? '',
+      })
+      await saveStoreToPersistence()
+      return Response.json({ user: result }, { status: 200 })
+    }
+
+    if (action === 'update-profile') {
+      const result = getUserStore().updateProfile({
+        username: (body.username as string | undefined) ?? '',
+        avatar: body.avatar as string | undefined,
+        province: body.province as string | undefined,
+        city: body.city as string | undefined,
+        phone: body.phone as string | undefined,
+        email: body.email as string | undefined,
       })
       await saveStoreToPersistence()
       return Response.json({ user: result }, { status: 200 })

@@ -1,4 +1,5 @@
 import { asProfileApiError, getUserStore } from '@/lib/profile/user-store'
+import { writeSnapshotToFile } from '@/lib/profile/file-persistence'
 
 interface ChangePasswordBody {
   username: string
@@ -25,6 +26,10 @@ export async function POST(request: Request): Promise<Response> {
       nextPassword: body.newPassword ?? '',
       confirmNextPassword: body.confirmNewPassword ?? '',
     })
+
+    // 👇 ذخیره تغییرات در فایل JSON
+    const snapshot = getUserStore().exportSnapshot()
+    await writeSnapshotToFile(snapshot)
 
     return Response.json({ user: result }, { status: 200 })
   } catch (error: unknown) {

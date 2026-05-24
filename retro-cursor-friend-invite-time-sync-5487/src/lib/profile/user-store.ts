@@ -31,6 +31,22 @@ interface ProfileNotification {
   read: boolean
 }
 
+type TimeControlCategory = 'bullet' | 'blitz' | 'rapid'
+
+interface CategoryGameStats {
+  played: number
+  won: number
+  lost: number
+  draw: number
+}
+
+interface GameStats {
+  total: { played: number; won: number; lost: number; draw: number }
+  bullet: CategoryGameStats
+  blitz: CategoryGameStats
+  rapid: CategoryGameStats
+}
+
 interface RegisteredUser {
   username: string
   passwordHash: string
@@ -41,6 +57,12 @@ interface RegisteredUser {
   outgoingRequests: string[]
   incomingGameInvites: GameInvite[]
   notifications: ProfileNotification[]
+  avatar?: string
+  province?: string
+  city?: string
+  phone?: string
+  email?: string
+  gameStats: GameStats
 }
 
 interface NotificationView {
@@ -117,6 +139,17 @@ class UserStore {
           }))
         : [],
       notifications: this.cloneNotifications(user.notifications),
+      avatar: user.avatar,
+      province: user.province,
+      city: user.city,
+      phone: user.phone,
+      email: user.email,
+      gameStats: {
+        total: { ...user.gameStats?.total ?? { played: 0, won: 0, lost: 0, draw: 0 } },
+        bullet: { ...user.gameStats?.bullet ?? { played: 0, won: 0, lost: 0, draw: 0 } },
+        blitz: { ...user.gameStats?.blitz ?? { played: 0, won: 0, lost: 0, draw: 0 } },
+        rapid: { ...user.gameStats?.rapid ?? { played: 0, won: 0, lost: 0, draw: 0 } },
+      },
     }
   }
 
@@ -371,6 +404,12 @@ class UserStore {
       outgoingRequests: [],
       incomingGameInvites: [],
       notifications: [],
+      gameStats: {
+        total: { played: 0, won: 0, lost: 0, draw: 0 },
+        bullet: { played: 0, won: 0, lost: 0, draw: 0 },
+        blitz: { played: 0, won: 0, lost: 0, draw: 0 },
+        rapid: { played: 0, won: 0, lost: 0, draw: 0 },
+      },
     })
 
     return { username }
@@ -444,6 +483,33 @@ class UserStore {
     return { username: newUsername }
   }
 
+  updateProfile(input: {
+    username: string
+    avatar?: string
+    province?: string
+    city?: string
+    phone?: string
+    email?: string
+  }): { username: string } {
+    const normalized = this.normalizeUsername(input.username)
+    if (!normalized) {
+      throw new ProfileApiError(400, 'INVALID_USERNAME', 'نام کاربری الزامی است.')
+    }
+
+    const user = this.getUserByNormalizedUsername(normalized)
+    this.markUserActive(user)
+
+    if (input.avatar !== undefined) user.avatar = input.avatar
+    if (input.province !== undefined) user.province = input.province
+    if (input.city !== undefined) user.city = input.city
+    if (input.phone !== undefined) user.phone = input.phone
+    if (input.email !== undefined) user.email = input.email
+
+    this.usersByName.set(normalized, user)
+
+    return { username: user.username }
+  }
+
   changePassword(input: {
     username: string
     currentPassword: string
@@ -513,6 +579,50 @@ class UserStore {
       outgoingRequests,
       incomingGameInvites,
       incomingCount: incomingRequests.length,
+    }
+  }
+
+  checkUsername(input: { username: string; currentUsername?: string }): { available: boolean; exists: boolean } {
+    const username = input.username.trim()
+    if (username.length < 3) {
+      return { available: false, exists: false }
+    }
+
+    const normalized = this.normalizeUsername(username)
+    const currentNormalized = input.currentUsername ? this.normalizeUsername(input.currentUsername) : ''
+
+    // If checking the same user's own username, it's always available
+    if (currentNormalized && normalized === currentNormalized) {
+      return { available: true, exists: false }
+    }
+
+    const exists = this.usersByName.has(normalized)
+    return { available: !exists, exists }
+  }
+
+  getUserProfile(input: { username: string }): {
+    username: string
+    avatar?: string
+    province?: string
+    city?: string
+    phone?: string
+    email?: string
+  } {
+    const normalized = this.normalizeUsername(input.username)
+    if (!normalized) {
+      throw new ProfileApiError(400, 'INVALID_USERNAME', 'نام کاربری الزامی است.')
+    }
+
+    const user = this.getUserByNormalizedUsername(normalized)
+    this.markUserActive(user)
+
+    return {
+      username: user.username,
+      avatar: user.avatar,
+      province: user.province,
+      city: user.city,
+      phone: user.phone,
+      email: user.email,
     }
   }
 
@@ -820,6 +930,68 @@ class UserStore {
     this.addNotification(inviter, action === 'accept' ? 'game_invite_accepted' : 'game_invite_rejected', normalized)
 
     return { inviteId, action }
+  }
+
+  recordGameResult(input: {
+    username: string
+    result: 'win' | 'loss' | 'draw'
+    timeControlMinutes: number
+    incrementSeconds: number
+  }): { gameStats: GameStats } {
+    const normalized = this.normalizeUsername(input.username)
+    if (!normalized) {
+      throw new ProfileApiError(400, 'INVALID_USERNAME', 'نام کاربری الزامی است.')
+    }
+
+    const user = this.getUserByNormalizedUsername(normalized)
+    this.markUserActive(user)
+
+    if (!user.gameStats) {
+      user.gameStats = {
+        total: { played: 0, won: 0, lost: 0, draw: 0 },
+        bullet: { played: 0, won: 0, lost: 0, draw: 0 },
+        blitz: { played: 0, won: 0, lost: 0, draw: 0 },
+        rapid: { played: 0, won: 0, lost: 0, draw: 0 },
+      }
+    }
+
+    // Determine category based on time control
+    const totalMinutes = input.timeControlMinutes + input.incrementSeconds / 60
+    let category: TimeControlCategory
+    if (totalMinutes < 3) {
+      category = 'bullet'
+    } else if (totalMinutes < 10) {
+      category = 'blitz'
+    } else {
+      category = 'rapid'
+    }
+
+    // Update totals
+    user.gameStats.total.played += 1
+    if (input.result === 'win') user.gameStats.total.won += 1
+    else if (input.result === 'loss') user.gameStats.total.lost += 1
+    else user.gameStats.total.draw += 1
+
+    // Update category stats
+    user.gameStats[category].played += 1
+    if (input.result === 'win') user.gameStats[category].won += 1
+    else if (input.result === 'loss') user.gameStats[category].lost += 1
+    else user.gameStats[category].draw += 1
+
+    this.usersByName.set(normalized, user)
+    return { gameStats: user.gameStats }
+  }
+
+  getGameStats(input: { username: string }): { gameStats: GameStats | null } {
+    const normalized = this.normalizeUsername(input.username)
+    if (!normalized) {
+      throw new ProfileApiError(400, 'INVALID_USERNAME', 'نام کاربری الزامی است.')
+    }
+
+    const user = this.getUserByNormalizedUsername(normalized)
+    this.markUserActive(user)
+
+    return { gameStats: user.gameStats ?? null }
   }
 
 }
