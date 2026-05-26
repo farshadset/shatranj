@@ -33,11 +33,14 @@ interface ProfileNotification {
 
 type TimeControlCategory = 'bullet' | 'blitz' | 'rapid'
 
+type SkillLevel = 'beginner' | 'intermediate' | 'advanced' | 'expert'
+
 interface CategoryGameStats {
   played: number
   won: number
   lost: number
   draw: number
+  rating: number
 }
 
 interface GameStats {
@@ -63,6 +66,7 @@ interface RegisteredUser {
   phone?: string
   email?: string
   gameStats: GameStats
+  skillLevel?: SkillLevel
 }
 
 interface NotificationView {
@@ -146,9 +150,9 @@ class UserStore {
       email: user.email,
       gameStats: {
         total: { ...user.gameStats?.total ?? { played: 0, won: 0, lost: 0, draw: 0 } },
-        bullet: { ...user.gameStats?.bullet ?? { played: 0, won: 0, lost: 0, draw: 0 } },
-        blitz: { ...user.gameStats?.blitz ?? { played: 0, won: 0, lost: 0, draw: 0 } },
-        rapid: { ...user.gameStats?.rapid ?? { played: 0, won: 0, lost: 0, draw: 0 } },
+        bullet: { ...user.gameStats?.bullet ?? { played: 0, won: 0, lost: 0, draw: 0, rating: 1000 } },
+        blitz: { ...user.gameStats?.blitz ?? { played: 0, won: 0, lost: 0, draw: 0, rating: 1000 } },
+        rapid: { ...user.gameStats?.rapid ?? { played: 0, won: 0, lost: 0, draw: 0, rating: 1000 } },
       },
     }
   }
@@ -406,9 +410,9 @@ class UserStore {
       notifications: [],
       gameStats: {
         total: { played: 0, won: 0, lost: 0, draw: 0 },
-        bullet: { played: 0, won: 0, lost: 0, draw: 0 },
-        blitz: { played: 0, won: 0, lost: 0, draw: 0 },
-        rapid: { played: 0, won: 0, lost: 0, draw: 0 },
+        bullet: { played: 0, won: 0, lost: 0, draw: 0, rating: 1000 },
+        blitz: { played: 0, won: 0, lost: 0, draw: 0, rating: 1000 },
+        rapid: { played: 0, won: 0, lost: 0, draw: 0, rating: 1000 },
       },
     })
 
@@ -607,6 +611,7 @@ class UserStore {
     city?: string
     phone?: string
     email?: string
+    gameStats: GameStats
   } {
     const normalized = this.normalizeUsername(input.username)
     if (!normalized) {
@@ -623,6 +628,12 @@ class UserStore {
       city: user.city,
       phone: user.phone,
       email: user.email,
+      gameStats: user.gameStats ?? {
+        total: { played: 0, won: 0, lost: 0, draw: 0 },
+        bullet: { played: 0, won: 0, lost: 0, draw: 0, rating: 1000 },
+        blitz: { played: 0, won: 0, lost: 0, draw: 0, rating: 1000 },
+        rapid: { played: 0, won: 0, lost: 0, draw: 0, rating: 1000 },
+      },
     }
   }
 
@@ -949,9 +960,9 @@ class UserStore {
     if (!user.gameStats) {
       user.gameStats = {
         total: { played: 0, won: 0, lost: 0, draw: 0 },
-        bullet: { played: 0, won: 0, lost: 0, draw: 0 },
-        blitz: { played: 0, won: 0, lost: 0, draw: 0 },
-        rapid: { played: 0, won: 0, lost: 0, draw: 0 },
+        bullet: { played: 0, won: 0, lost: 0, draw: 0, rating: 1000 },
+        blitz: { played: 0, won: 0, lost: 0, draw: 0, rating: 1000 },
+        rapid: { played: 0, won: 0, lost: 0, draw: 0, rating: 1000 },
       }
     }
 
@@ -973,10 +984,21 @@ class UserStore {
     else user.gameStats.total.draw += 1
 
     // Update category stats
-    user.gameStats[category].played += 1
-    if (input.result === 'win') user.gameStats[category].won += 1
-    else if (input.result === 'loss') user.gameStats[category].lost += 1
-    else user.gameStats[category].draw += 1
+    const catStats = user.gameStats[category]
+    catStats.played += 1
+    if (input.result === 'win') catStats.won += 1
+    else if (input.result === 'loss') catStats.lost += 1
+    else catStats.draw += 1
+
+    // Calculate rating change (simple Elo-like system)
+    // K factor decreases as more games are played (starts at 40, minimum 16)
+    const kFactor = Math.max(16, 40 - Math.floor(catStats.played / 10) * 2)
+    if (input.result === 'win') {
+      catStats.rating += kFactor
+    } else if (input.result === 'loss') {
+      catStats.rating = Math.max(100, catStats.rating - kFactor)
+    }
+    // Draw: no rating change
 
     this.usersByName.set(normalized, user)
     return { gameStats: user.gameStats }
@@ -992,6 +1014,48 @@ class UserStore {
     this.markUserActive(user)
 
     return { gameStats: user.gameStats ?? null }
+  }
+
+  private getRatingForSkillLevel(skillLevel: SkillLevel): number {
+    switch (skillLevel) {
+      case 'beginner':
+        return 200
+      case 'intermediate':
+        return 400
+      case 'advanced':
+        return 800
+      case 'expert':
+        return 1200
+      default:
+        return 1000
+    }
+  }
+
+  setSkillLevel(input: { username: string; skillLevel: SkillLevel }): { gameStats: GameStats } {
+    const normalized = this.normalizeUsername(input.username)
+    if (!normalized) {
+      throw new ProfileApiError(400, 'INVALID_USERNAME', 'نام کاربری الزامی است.')
+    }
+
+    const user = this.getUserByNormalizedUsername(normalized)
+    this.markUserActive(user)
+
+    if (input.skillLevel !== 'beginner' && input.skillLevel !== 'intermediate' &&
+        input.skillLevel !== 'advanced' && input.skillLevel !== 'expert') {
+      throw new ProfileApiError(400, 'INVALID_SKILL_LEVEL', 'سطح مهارت نامعتبر است.')
+    }
+
+    const rating = this.getRatingForSkillLevel(input.skillLevel)
+    user.skillLevel = input.skillLevel
+    user.gameStats = {
+      total: { played: 0, won: 0, lost: 0, draw: 0 },
+      bullet: { played: 0, won: 0, lost: 0, draw: 0, rating },
+      blitz: { played: 0, won: 0, lost: 0, draw: 0, rating },
+      rapid: { played: 0, won: 0, lost: 0, draw: 0, rating },
+    }
+
+    this.usersByName.set(normalized, user)
+    return { gameStats: user.gameStats }
   }
 
 }

@@ -9,16 +9,40 @@ import { ChatMessage, PlayerColor, RoomSession, RoomSnapshot, RoomStatus } from 
 import { PROFILE_USERNAME_STORAGE_KEY } from '@/lib/profile/constants'
 
 const recordedGameResults = new Set<string>()
+const RANKED_ROOMS_KEY = 'ranked-room-ids'
+
+function getRankedRoomIds(): Set<string> {
+  try {
+    const raw = localStorage.getItem(RANKED_ROOMS_KEY)
+    if (!raw) return new Set()
+    return new Set(JSON.parse(raw) as string[])
+  } catch {
+    return new Set()
+  }
+}
+
+function addRankedRoomId(roomId: string): void {
+  try {
+    const ids = getRankedRoomIds()
+    ids.add(roomId)
+    localStorage.setItem(RANKED_ROOMS_KEY, JSON.stringify([...ids]))
+  } catch {}
+}
+
+function isRankedRoom(roomId: string): boolean {
+  const searchParams = new URLSearchParams(window.location.search)
+  if (searchParams.get('mode') === 'ranked') return true
+  return getRankedRoomIds().has(roomId)
+}
 
 function recordGameResultIfRanked(snapshot: RoomSnapshot, session: RoomSession): void {
   if (recordedGameResults.has(snapshot.roomId)) return
+  if (!isRankedRoom(snapshot.roomId)) return
   recordedGameResults.add(snapshot.roomId)
-  const searchParams = new URLSearchParams(window.location.search)
-  if (searchParams.get('mode') !== 'ranked') return
-  if (snapshot.status === 'active' || snapshot.status === 'waiting') return
 
   const username = localStorage.getItem(PROFILE_USERNAME_STORAGE_KEY)?.trim()
   if (!username) return
+  if (snapshot.status === 'active' || snapshot.status === 'waiting') return
 
   let result: 'win' | 'loss' | 'draw'
   if (snapshot.status === 'draw') {
@@ -542,6 +566,7 @@ export function ChessRoom() {
       clearSelection()
       persistSession(nextSnapshot.roomId, syncedSession)
       connectEvents(nextSnapshot.roomId)
+      addRankedRoomId(nextSnapshot.roomId)
     },
     [clearSelection, connectEvents, persistSession, resolveSessionColor]
   )

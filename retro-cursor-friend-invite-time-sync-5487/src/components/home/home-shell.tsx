@@ -363,7 +363,7 @@ function HomeContent({
           {/* Category: Bullet */}
           <div>
             <p className="mb-2 flex items-center gap-2 text-lg font-bold text-cyan-300/80" dir="ltr">
-              <img src="/icons/time-controls/bullet.png" alt="Bullet" className="w-8 h-8" />
+              <img src="/icons/time-controls/bullet.png" alt="Bullet" className="w-6 h-6" />
               <span>Bullet</span>
             </p>
             <div className="grid grid-cols-3 gap-2">
@@ -391,7 +391,7 @@ function HomeContent({
           {/* Category: Blitz */}
           <div>
             <p className="mb-2 flex items-center gap-2 text-lg font-bold text-cyan-300/80" dir="ltr">
-              <img src="/icons/time-controls/blitz.png" alt="Blitz" className="w-8 h-8" />
+              <img src="/icons/time-controls/blitz.png" alt="Blitz" className="w-6 h-6" />
               <span>Blitz</span>
             </p>
             <div className="grid grid-cols-3 gap-2">
@@ -419,7 +419,7 @@ function HomeContent({
           {/* Category: Rapid */}
           <div>
             <p className="mb-2 flex items-center gap-2 text-lg font-bold text-cyan-300/80" dir="ltr">
-              <img src="/icons/time-controls/rapid.png" alt="Rapid" className="w-8 h-8" />
+              <img src="/icons/time-controls/rapid.png" alt="Rapid" className="w-6 h-6" />
               <span>Rapid</span>
             </p>
             <div className="grid grid-cols-2 gap-2">
@@ -568,6 +568,9 @@ function ProfileContent(props: ProfileContentProps) {
 
   const [isKebabOpen, setIsKebabOpen] = useState(false)
   const [totalPlayedGames, setTotalPlayedGames] = useState(0)
+  const [bulletRating, setBulletRating] = useState(1000)
+  const [blitzRating, setBlitzRating] = useState(1000)
+  const [rapidRating, setRapidRating] = useState(1000)
 
   useEffect(() => {
     if (!profileName.trim()) return
@@ -576,6 +579,15 @@ function ProfileContent(props: ProfileContentProps) {
       .then(data => {
         if (data.gameStats?.total?.played !== undefined) {
           setTotalPlayedGames(data.gameStats.total.played)
+        }
+        if (data.gameStats?.bullet?.rating !== undefined) {
+          setBulletRating(data.gameStats.bullet.rating)
+        }
+        if (data.gameStats?.blitz?.rating !== undefined) {
+          setBlitzRating(data.gameStats.blitz.rating)
+        }
+        if (data.gameStats?.rapid?.rating !== undefined) {
+          setRapidRating(data.gameStats.rapid.rating)
         }
       })
       .catch(() => {})
@@ -676,6 +688,27 @@ function ProfileContent(props: ProfileContentProps) {
           <div className="flex flex-col items-center gap-1">
             <img src="/icons/footer/pazel.png" alt="puzzle" className="h-24 w-24 rotate-90" />
             <span className="text-[10px] text-slate-400">پازل</span>
+          </div>
+        </div>
+
+        <div className="space-y-2">
+          <p className="text-xs text-slate-400">ریتینگ بازی‌ها</p>
+          <div className="grid grid-cols-3 gap-2">
+            <div className="flex flex-col items-center gap-1 rounded-lg border border-slate-700 bg-slate-900/50 py-2">
+              <img src="/icons/time-controls/bullet.png" alt="Bullet" className="w-8 h-8" />
+              <span className="text-[10px] text-slate-400">Bullet</span>
+              <span className="text-xs font-bold text-cyan-300">{bulletRating}</span>
+            </div>
+            <div className="flex flex-col items-center gap-1 rounded-lg border border-slate-700 bg-slate-900/50 py-2">
+              <img src="/icons/time-controls/blitz.png" alt="Blitz" className="w-8 h-8" />
+              <span className="text-[10px] text-slate-400">Blitz</span>
+              <span className="text-xs font-bold text-cyan-300">{blitzRating}</span>
+            </div>
+            <div className="flex flex-col items-center gap-1 rounded-lg border border-slate-700 bg-slate-900/50 py-2">
+              <img src="/icons/time-controls/rapid.png" alt="Rapid" className="w-8 h-8" />
+              <span className="text-[10px] text-slate-400">Rapid</span>
+              <span className="text-xs font-bold text-cyan-300">{rapidRating}</span>
+            </div>
           </div>
         </div>
 
