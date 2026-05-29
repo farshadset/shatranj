@@ -14,6 +14,8 @@ import (
 
 const (
 	roomIDLength = 6
+	// 30 seconds for disconnect timeout
+	disconnectTimeoutMs = 30_000
 )
 
 type roomEvent struct {
@@ -59,6 +61,11 @@ type roomState struct {
 	ActiveSince   *int64
 	CreatedAt     int64
 	UpdatedAt     int64
+
+	// Disconnect tracking
+	PlayerConnectionCounts map[string]int          // playerId -> number of active SSE conns
+	DisconnectTimers       map[string]*time.Timer  // playerId -> 30s timer
+	DisconnectTimerExpires map[string]time.Time    // playerId -> when timer expires
 }
 
 type RoomStore struct {
@@ -222,6 +229,17 @@ func (s *RoomStore) snapshotForLocked(room *roomState) RoomSnapshot {
 			spectators++
 		}
 	}
+
+	// Build playerDisconnected info
+	whiteCount := 0
+	blackCount := 0
+	if room.Players.White != nil {
+		whiteCount = room.PlayerConnectionCounts[room.Players.White.ID]
+	}
+	if room.Players.Black != nil {
+		blackCount = room.PlayerConnectionCounts[room.Players.Black.ID]
+	}
+
 	return RoomSnapshot{
 		RoomID:     room.ID,
 		Status:     room.Status,
@@ -244,6 +262,30 @@ func (s *RoomStore) snapshotForLocked(room *roomState) RoomSnapshot {
 		ActiveSince:    cloneInt64Pointer(room.ActiveSince),
 		CreatedAt:      room.CreatedAt,
 		UpdatedAt:      room.UpdatedAt,
+		PlayerDisconnected: &PlayerDisconnected{
+			White: room.Players.White != nil && whiteCount == 0,
+			Black: room.Players.Black != nil && blackCount == 0,
+		},
+		DisconnectTimerMs: &DisconnectTimerMs{
+			White: func() int64 {
+				if room.Players.White == nil {
+					return 0
+				}
+				if expire, ok := room.DisconnectTimerExpires[room.Players.White.ID]; ok {
+					return maxI64(0, expire.UnixMilli()-time.Now().UnixMilli())
+				}
+				return 0
+			}(),
+			Black: func() int64 {
+				if room.Players.Black == nil {
+					return 0
+				}
+				if expire, ok := room.DisconnectTimerExpires[room.Players.Black.ID]; ok {
+					return maxI64(0, expire.UnixMilli()-time.Now().UnixMilli())
+				}
+				return 0
+			}(),
+		},
 	}
 }
 
@@ -356,6 +398,9 @@ func (s *RoomStore) CreateRoom(name string, timeControlMs int64, incrementMs int
 		BlackTimeMs:     timeControlMs,
 		CreatedAt:       nowMs,
 		UpdatedAt:       nowMs,
+		PlayerConnectionCounts: map[string]int{},
+		DisconnectTimers:       map[string]*time.Timer{},
+		DisconnectTimerExpires: map[string]time.Time{},
 	}
 	room.Players.White = white
 	color := PlayerWhite
@@ -586,6 +631,64 @@ func (s *RoomStore) Resign(roomID, token string) (RoomSnapshot, *ChessAPIError) 
 	return s.emitLocked(room, "resigned"), nil
 }
 
+// GetSessionForToken returns the session record for a given token.
+func (s *RoomStore) GetSessionForToken(roomID, token string) (RoomSession, *ChessAPIError) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	room, apiErr := s.getRoomLocked(roomID)
+	if apiErr != nil {
+		return RoomSession{}, apiErr
+	}
+
+	session, ok := room.SessionsByToken[token]
+	if !ok {
+		return RoomSession{}, Unauthorized("INVALID_TOKEN", "Invalid player session token.")
+	}
+
+	color := session.Color
+	return RoomSession{
+		Token:    session.Token,
+		PlayerID: session.PlayerID,
+		Color:    color,
+		Name:     session.Name,
+	}, nil
+}
+
+// RejoinRoom allows a disconnected player to rejoin their game within the 30-second window.
+func (s *RoomStore) RejoinRoom(roomID, token string) (RoomSnapshot, *ChessAPIError) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	room, apiErr := s.getRoomLocked(roomID)
+	if apiErr != nil {
+		return RoomSnapshot{}, apiErr
+	}
+
+	session, ok := room.SessionsByToken[token]
+	if !ok {
+		return RoomSnapshot{}, Unauthorized("INVALID_TOKEN", "Invalid player session token.")
+	}
+
+	now := time.Now()
+	room.UpdatedAt = now.UnixMilli()
+
+	// Check if there was a pending disconnect timer and cancel it
+	if timer, ok := room.DisconnectTimers[session.PlayerID]; ok {
+		timer.Stop()
+		delete(room.DisconnectTimers, session.PlayerID)
+		delete(room.DisconnectTimerExpires, session.PlayerID)
+
+	// Increment connection count FIRST to prevent race condition with SSE
+	room.PlayerConnectionCounts[session.PlayerID]++
+		s.emitLocked(room, "player-rejoined")
+	} else {
+		s.emitLocked(room, "player-reconnected")
+	}
+
+	return s.snapshotForLocked(room), nil
+}
+
 func (s *RoomStore) Subscribe(roomID string) (<-chan roomEvent, func(), *ChessAPIError) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -620,4 +723,156 @@ func (s *RoomStore) DescribeStoreMode() map[string]any {
 		"storeMode":          "memory",
 		"singleInstanceOnly": true,
 	}
+}
+
+// ===== Disconnect Tracking (Go Server) =====
+
+// OnPlayerConnected is called when a player establishes an SSE connection.
+// It increments the connection count. If there was a pending disconnect timer,
+// it is cancelled (player reconnected in time).
+func (s *RoomStore) OnPlayerConnected(roomID string, playerID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	room, err := s.getRoomLocked(roomID)
+	if err != nil {
+		return
+	}
+
+	room.PlayerConnectionCounts[playerID]++
+
+	// If the player was counting down to disconnect, cancel that timer
+	if timer, ok := room.DisconnectTimers[playerID]; ok {
+		timer.Stop()
+		delete(room.DisconnectTimers, playerID)
+		delete(room.DisconnectTimerExpires, playerID)
+		// Notify subscribers that player reconnected
+		s.emitLocked(room, "player-reconnected")
+	}
+}
+
+// OnPlayerDisconnected is called when a player's SSE connection drops.
+// It decrements the connection count. If it reaches 0 and game is active,
+// starts a 30-second timer. When timer expires, the player loses.
+func (s *RoomStore) OnPlayerDisconnected(roomID string, playerID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	room, err := s.getRoomLocked(roomID)
+	if err != nil {
+		return
+	}
+
+	count := room.PlayerConnectionCounts[playerID]
+	if count > 0 {
+		count--
+	}
+	room.PlayerConnectionCounts[playerID] = count
+
+	// Only start timer if no more connections exist and game is active
+	if count > 0 {
+		return
+	}
+	if room.Status != StatusActive {
+		return
+	}
+
+	// Check if timer is already running
+	if _, exists := room.DisconnectTimers[playerID]; exists {
+		return
+	}
+
+	now := time.Now()
+	timer := time.AfterFunc(time.Duration(disconnectTimeoutMs)*time.Millisecond, func() {
+		s.handleDisconnectTimeout(roomID, playerID)
+	})
+
+	room.DisconnectTimers[playerID] = timer
+	room.DisconnectTimerExpires[playerID] = now.Add(time.Duration(disconnectTimeoutMs) * time.Millisecond)
+	room.UpdatedAt = now.UnixMilli()
+
+	// Notify subscribers that player disconnected
+	s.emitLocked(room, "player-disconnected")
+}
+
+// GetPlayerIDByToken looks up a playerId from a session token.
+func (s *RoomStore) GetPlayerIDByToken(roomID string, token string) string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	room, err := s.getRoomLocked(roomID)
+	if err != nil {
+		return ""
+	}
+
+	if session, ok := room.SessionsByToken[token]; ok {
+		return session.PlayerID
+	}
+	return ""
+}
+
+// handleDisconnectTimeout is called when the 30-second disconnect timer expires.
+// The disconnected player loses the game.
+func (s *RoomStore) handleDisconnectTimeout(roomID string, playerID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	room, err := s.getRoomLocked(roomID)
+	if err != nil {
+		return
+	}
+
+	// If game is no longer active, do nothing
+	if room.Status != StatusActive {
+		delete(room.DisconnectTimers, playerID)
+		delete(room.DisconnectTimerExpires, playerID)
+		return
+	}
+
+	// Check if player still disconnected (no connections)
+	count := room.PlayerConnectionCounts[playerID]
+	if count > 0 {
+		delete(room.DisconnectTimers, playerID)
+		delete(room.DisconnectTimerExpires, playerID)
+		return
+	}
+
+	// Determine which color disconnected
+	var disconnectedColor *PlayerColor
+	if room.Players.White != nil && room.Players.White.ID == playerID {
+		c := PlayerWhite
+		disconnectedColor = &c
+	} else if room.Players.Black != nil && room.Players.Black.ID == playerID {
+		c := PlayerBlack
+		disconnectedColor = &c
+	}
+
+	if disconnectedColor == nil {
+		delete(room.DisconnectTimers, playerID)
+		delete(room.DisconnectTimerExpires, playerID)
+		return
+	}
+
+	// The opponent wins
+	var winner PlayerColor
+	if *disconnectedColor == PlayerWhite {
+		winner = PlayerBlack
+	} else {
+		winner = PlayerWhite
+	}
+
+	room.Status = StatusTimeout
+	room.Winner = &winner
+	room.DrawReason = nil
+	room.ActiveSince = nil
+	room.UpdatedAt = time.Now().UnixMilli()
+
+	// Clear all disconnect timers for this room
+	for _, timer := range room.DisconnectTimers {
+		timer.Stop()
+	}
+	room.DisconnectTimers = map[string]*time.Timer{}
+	room.DisconnectTimerExpires = map[string]time.Time{}
+
+	s.emitLocked(room, "game-over")
 }

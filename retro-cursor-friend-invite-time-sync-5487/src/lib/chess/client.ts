@@ -192,7 +192,20 @@ export async function acceptRematch(input: { roomId: string; token: string }): P
   return parseApiResponse<SessionResponse>(response)
 }
 
-export function roomEventsUrl(roomId: string): string {
-  return apiUrl(`/api/chess/rooms/${roomId}/events`)
+export function roomEventsUrl(roomId: string, token?: string): string {
+  const baseUrl = apiUrl(`/api/chess/rooms/${roomId}/events`)
+  if (token) {
+    return `${baseUrl}?token=${encodeURIComponent(token)}`
+  }
+  return baseUrl
+}
+
+export async function rejoinRoom(input: { roomId: string; token: string }): Promise<SessionResponse> {
+  const response = await fetch(apiUrl(`/api/chess/rooms/${input.roomId}/rejoin`), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ token: input.token }),
+  })
+  return parseApiResponse<SessionResponse>(response)
 }
 

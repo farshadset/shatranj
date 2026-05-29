@@ -79,6 +79,16 @@ export interface RoomSnapshot {
     timeControlMs: number
     incrementMs: number
   }
+  /** Indicates which players are currently disconnected (no SSE connection) */
+  playerDisconnected?: {
+    white: boolean
+    black: boolean
+  }
+  /** Time remaining in milliseconds until disconnected player loses (if applicable) */
+  disconnectTimerMs?: {
+    white: number | null
+    black: number | null
+  }
 }
 
 export interface PlayerSession {

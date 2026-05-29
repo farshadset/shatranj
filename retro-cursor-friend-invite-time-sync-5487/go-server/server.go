@@ -119,14 +119,16 @@ func (s *Server) handleRoomByID(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	switch parts[1] {
-	case "join":
-		s.handleJoinRoom(w, r, roomID)
-	case "move":
-		s.handleMove(w, r, roomID)
-	case "resign":
-		s.handleResign(w, r, roomID)
-	case "events":
+switch parts[1] {
+  case "join":
+    s.handleJoinRoom(w, r, roomID)
+  case "rejoin":
+    s.handleRejoinRoom(w, r, roomID)
+  case "move":
+    s.handleMove(w, r, roomID)
+  case "resign":
+    s.handleResign(w, r, roomID)
+  case "events":
 		s.handleEvents(w, r, roomID)
 	default:
 		writeAPIError(w, NotFound("NOT_FOUND", "Route not found."))
@@ -159,6 +161,34 @@ func (s *Server) handleJoinRoom(w http.ResponseWriter, r *http.Request, roomID s
 		return
 	}
 	snapshot, session, apiErr := s.store.JoinRoom(roomID, body.Name)
+	if apiErr != nil {
+		writeAPIError(w, apiErr)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"snapshot": snapshot,
+		"session":  session,
+	})
+}
+
+func (s *Server) handleRejoinRoom(w http.ResponseWriter, r *http.Request, roomID string) {
+	if r.Method != http.MethodPost {
+		writeAPIError(w, NewChessAPIError(http.StatusMethodNotAllowed, "METHOD_NOT_ALLOWED", "Method not allowed."))
+		return
+	}
+	var body struct {
+		Token string `json:"token"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeAPIError(w, BadRequest("INVALID_JSON", "Request body must be valid JSON."))
+		return
+	}
+	session, apiErr := s.store.GetSessionForToken(roomID, body.Token)
+	if apiErr != nil {
+		writeAPIError(w, apiErr)
+		return
+	}
+	snapshot, apiErr := s.store.RejoinRoom(roomID, body.Token)
 	if apiErr != nil {
 		writeAPIError(w, apiErr)
 		return
@@ -224,12 +254,20 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request, roomID str
 		return
 	}
 
+	// Extract token from query param to know who is connecting
+	token := strings.TrimSpace(r.URL.Query().Get("token"))
+	var playerID string
+
+	// Resolve playerId from token
+	if token != "" {
+		playerID = s.store.GetPlayerIDByToken(roomID, token)
+	}
+
 	events, unsubscribe, apiErr := s.store.Subscribe(roomID)
 	if apiErr != nil {
 		writeAPIError(w, apiErr)
 		return
 	}
-	defer unsubscribe()
 
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache, no-transform")
@@ -241,10 +279,23 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request, roomID str
 		return
 	}
 
+	// Notify server that this player connected
+	if playerID != "" {
+		s.store.OnPlayerConnected(roomID, playerID)
+	}
+
 	if err := writeSSE(w, "connected", map[string]any{"ok": true, "roomId": roomID}); err != nil {
+		if playerID != "" {
+			s.store.OnPlayerDisconnected(roomID, playerID)
+		}
+		unsubscribe()
 		return
 	}
 	if err := writeSSE(w, "snapshot", snapshot); err != nil {
+		if playerID != "" {
+			s.store.OnPlayerDisconnected(roomID, playerID)
+		}
+		unsubscribe()
 		return
 	}
 	flusher.Flush()
@@ -252,6 +303,14 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request, roomID str
 	ctx := r.Context()
 	ticker := time.NewTicker(15 * time.Second)
 	defer ticker.Stop()
+
+	// When the request context is done (client disconnected), notify server
+	defer func() {
+		if playerID != "" {
+			s.store.OnPlayerDisconnected(roomID, playerID)
+		}
+		unsubscribe()
+	}()
 
 	for {
 		select {

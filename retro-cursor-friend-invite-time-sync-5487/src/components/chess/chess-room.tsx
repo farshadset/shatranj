@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Chess, Square } from 'chess.js'
 import { ChessBoard } from './chess-board'
 import { MoveList } from './move-list'
-import { createRoom, fetchRoom, joinRoom, makeMove, offerDraw, offerRematch, acceptRematch, resign, roomEventsUrl, sendChatMessage } from '@/lib/chess/client'
+import { createRoom, fetchRoom, joinRoom, makeMove, offerDraw, offerRematch, acceptRematch, resign, roomEventsUrl, sendChatMessage, rejoinRoom } from '@/lib/chess/client'
 import { ChatMessage, PlayerColor, RoomSession, RoomSnapshot, RoomStatus } from '@/lib/chess/types'
 import { PROFILE_USERNAME_STORAGE_KEY } from '@/lib/profile/constants'
 
@@ -218,6 +218,7 @@ export function ChessRoom() {
   const autoBootstrappingRef = useRef(false)
   const autoPlayerNameRef = useRef<string>('')
   const sessionRef = useRef<RoomSession | null>(null)
+  const sseTokenRef = useRef<string | undefined>(undefined)
 
   const playerColor = session?.color ?? 'white'
   const isPlayerTurn = Boolean(snapshot && session?.color && snapshot.turn === session.color && snapshot.status === 'active')
@@ -431,9 +432,10 @@ export function ChessRoom() {
   }, [])
 
   const connectEvents = useCallback(
-    (roomId: string) => {
+    (roomId: string, token?: string) => {
       disconnectEvents()
-      const source = new EventSource(roomEventsUrl(roomId))
+      sseTokenRef.current = token // Store token for reconnection
+      const source = new EventSource(roomEventsUrl(roomId, token))
 
       const applySnapshot = (rawPayload: string) => {
         try {
@@ -535,10 +537,20 @@ export function ChessRoom() {
           // ignore
         }
       })
+      source.addEventListener('player-disconnected', (event) => {
+        applySnapshot((event as MessageEvent<string>).data)
+      })
+      source.addEventListener('player-reconnected', (event) => {
+        applySnapshot((event as MessageEvent<string>).data)
+      })
+      source.addEventListener('player-rejoined', (event) => {
+        applySnapshot((event as MessageEvent<string>).data)
+      })
       source.onerror = () => {
         source.close()
+        const storedToken = sseTokenRef.current
         setTimeout(() => {
-          connectEvents(roomId)
+          connectEvents(roomId, storedToken)
         }, 1200)
       }
       eventSourceRef.current = source
@@ -565,7 +577,7 @@ export function ChessRoom() {
       setNowTick(Date.now())
       clearSelection()
       persistSession(nextSnapshot.roomId, syncedSession)
-      connectEvents(nextSnapshot.roomId)
+      connectEvents(nextSnapshot.roomId, syncedSession.token)
       addRankedRoomId(nextSnapshot.roomId)
     },
     [clearSelection, connectEvents, persistSession, resolveSessionColor]
@@ -581,10 +593,38 @@ export function ChessRoom() {
         try {
           const parsed = JSON.parse(raw) as StoredSession
           if (parsed?.roomId && parsed?.session?.token) {
-            const response = await fetchRoom(parsed.roomId)
-            if (cancelled) return
-            enterGame(response.snapshot, parsed.session)
-            return
+            // Try to rejoin using the existing token to restore connection tracking
+            try {
+              const response = await rejoinRoom({ roomId: parsed.roomId, token: parsed.session.token })
+              if (cancelled) return
+              // Navigate to the room URL to ensure correct URL
+              window.history.replaceState({}, '', `/online?room=${parsed.roomId}`)
+              enterGame(response.snapshot, response.session)
+              return
+            } catch (rejoinError) {
+              // Room might not exist anymore - check if we should go to main page
+              // Otherwise, try to at least fetch the room state to show what happened
+              const fetchResponse = await fetchRoom(parsed.roomId)
+              if (cancelled) return
+              // Check if room doesn't exist (404) or other error
+              if (!fetchResponse.snapshot || fetchResponse.snapshot.status === 'timeout') {
+                if (fetchResponse.snapshot?.status === 'timeout' && fetchResponse.snapshot.winner && fetchResponse.snapshot.winner !== parsed.session.color) {
+                  // Player lost due to disconnect timeout - show game over
+                  setGameOverModalOpen(true)
+                  enterGame(fetchResponse.snapshot, parsed.session)
+                  setSession(parsed.session)
+                } else {
+                  // Room doesn't exist or invalid - clear and go to main page
+                  clearPersistedSession()
+                  window.history.replaceState({}, '', '/online')
+                }
+                return
+              }
+              // Game is still active or waiting - rejoin without timer
+              window.history.replaceState({}, '', `/online?room=${parsed.roomId}`)
+              enterGame(fetchResponse.snapshot, parsed.session)
+              return
+            }
           }
         } catch {
           clearPersistedSession()
@@ -991,11 +1031,24 @@ export function ChessRoom() {
                 <div className="flex items-center gap-2 text-sm text-[#cbc7c2]">
                   <span className="inline-flex h-2.5 w-2.5 rounded-full bg-[#9f9a93]" />
                   <div className="flex flex-col">
-                    <span className="font-semibold text-slate-100">
-                      {playerColor === 'white'
-                        ? hydratedSnapshot.players.black?.name ?? 'Waiting...'
-                        : hydratedSnapshot.players.white?.name ?? 'Waiting...'}
-                    </span>
+                    <div className="flex items-center gap-2">
+                      <span className="font-semibold text-slate-100">
+                        {playerColor === 'white'
+                          ? hydratedSnapshot.players.black?.name ?? 'Waiting...'
+                          : hydratedSnapshot.players.white?.name ?? 'Waiting...'}
+                      </span>
+                      {hydratedSnapshot?.status === 'active' && (() => {
+                        const opponentColor = playerColor === 'white' ? 'black' : 'white'
+                        if (hydratedSnapshot?.playerDisconnected?.[opponentColor]) {
+                          const remainingMs = hydratedSnapshot?.disconnectTimerMs?.[opponentColor] ?? 0
+                          const remainingSeconds = Math.ceil(remainingMs / 1000)
+                          return <span className="text-[10px] font-bold text-orange-400">
+                            (قطع اتصال - {remainingSeconds} ثانیه)
+                          </span>
+                        }
+                        return null
+                      })()}
+                    </div>
                     {(() => {
                       const s = hydratedSnapshot
                       if (s.status === 'active' || s.status === 'waiting') return null

@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
-import { createRoom, joinRoom, roomEventsUrl } from '@/lib/chess/client'
+import { createRoom, joinRoom, roomEventsUrl, rejoinRoom } from '@/lib/chess/client'
 import type { RoomSession, RoomSnapshot } from '@/lib/chess/types'
 import { PROFILE_USERNAME_STORAGE_KEY } from '@/lib/profile/constants'
 import { Toast } from '@/components/ui/toast'
@@ -522,6 +522,8 @@ interface ProfileContentProps {
   isStartingOnline: boolean
   friendsLoading: boolean
   avatar: string
+  selectedLevel: string
+  onSelectedLevelChange: (value: string) => void
 }
 
 function ProfileContent(props: ProfileContentProps) {
@@ -564,13 +566,16 @@ function ProfileContent(props: ProfileContentProps) {
     onPlayAsGuest,
     isStartingOnline,
     friendsLoading,
+    selectedLevel,
+    onSelectedLevelChange,
   } = props
 
+  const isRegisterMode = mode === 'register'
   const [isKebabOpen, setIsKebabOpen] = useState(false)
   const [totalPlayedGames, setTotalPlayedGames] = useState(0)
-  const [bulletRating, setBulletRating] = useState(1000)
-  const [blitzRating, setBlitzRating] = useState(1000)
-  const [rapidRating, setRapidRating] = useState(1000)
+  const [bulletRating, setBulletRating] = useState(isRegisterMode ? parseInt(selectedLevel, 10) : 1000)
+  const [blitzRating, setBlitzRating] = useState(isRegisterMode ? parseInt(selectedLevel, 10) : 1000)
+  const [rapidRating, setRapidRating] = useState(isRegisterMode ? parseInt(selectedLevel, 10) : 1000)
 
   useEffect(() => {
     if (!profileName.trim()) return
@@ -589,15 +594,28 @@ function ProfileContent(props: ProfileContentProps) {
         if (data.gameStats?.rapid?.rating !== undefined) {
           setRapidRating(data.gameStats.rapid.rating)
         }
+        // If no existing data and this is a new user, set initial ratings based on selected level
+        if ((data.gameStats?.total?.played === undefined || data.gameStats.total.played === 0) && isRegisterMode) {
+          const levelValue = parseInt(selectedLevel, 10);
+          setBulletRating(levelValue);
+          setBlitzRating(levelValue);
+          setRapidRating(levelValue);
+        }
       })
-      .catch(() => {})
-  }, [profileName])
+      .catch(() => {
+        // If fetch fails and this is a new user registration, set initial ratings based on selected level
+        if (isRegisterMode) {
+          const levelValue = parseInt(selectedLevel, 10);
+          setBulletRating(levelValue);
+          setBlitzRating(levelValue);
+          setRapidRating(levelValue);
+        }
+      });
+  }, [profileName, isRegisterMode, selectedLevel]);
 
   const onToggleKebab = useCallback(() => {
     setIsKebabOpen(prev => !prev)
   }, [])
-
-  const isRegisterMode = mode === 'register'
 
   if (isAuthenticated) {
     return (
@@ -1006,19 +1024,37 @@ function ProfileContent(props: ProfileContentProps) {
           placeholder="حداقل ۶ کاراکتر"
         />
       </label>
-      {isRegisterMode ? (
-        <label className="block space-y-2">
-          <span className="text-sm text-slate-200">تکرار رمز عبور</span>
-          <input
-            type="password"
-            value={confirmPassword}
-            onChange={(event) => onConfirmPasswordChange(event.target.value)}
-            data-testid="profile-confirm-password-input"
-            className="w-full rounded-xl border border-slate-600 bg-slate-950 px-4 py-3 text-sm text-slate-100 outline-none ring-cyan-400 transition focus:ring-2"
-            placeholder="دوباره وارد کنید"
-          />
-        </label>
-      ) : null}
+{isRegisterMode ? (
+  <>
+    <label className="block space-y-2">
+      <span className="text-sm text-slate-200">تکرار رمز عبور</span>
+      <input
+        type="password"
+        value={confirmPassword}
+        onChange={(event) => onConfirmPasswordChange(event.target.value)}
+        data-testid="profile-confirm-password-input"
+        className="w-full rounded-xl border border-slate-600 bg-slate-950 px-4 py-3 text-sm text-slate-100 outline-none ring-cyan-400 transition focus:ring-2"
+        placeholder="دوباره وارد کنید"
+      />
+    </label>
+    
+    {/* Level selection for new users */}
+    <label className="block space-y-2">
+      <span className="text-sm text-slate-200">سطح کاربری</span>
+      <select
+        value={selectedLevel}
+        onChange={(event) => onSelectedLevelChange(event.target.value)}
+        data-testid="profile-level-select"
+        className="w-full rounded-xl border border-slate-600 bg-slate-950 px-4 py-3 text-sm text-slate-100 outline-none ring-cyan-400 transition focus:ring-2"
+      >
+        <option value="200">تازه وارد = 200</option>
+        <option value="400">مبتدی = 400</option>
+        <option value="800">متوسط = 800</option>
+        <option value="1200">پیشرفته = 1200</option>
+      </select>
+    </label>
+  </>
+) : null}
       <button
         type="button"
         onClick={onSubmit}
@@ -1119,10 +1155,11 @@ export function HomeShell() {
   const [profileName, setProfileName] = useState('')
   const [isAuthenticated, setIsAuthenticated] = useState(false)
   const [isGuestMode, setIsGuestMode] = useState(false)
-  const [draftName, setDraftName] = useState('')
-  const [password, setPassword] = useState('')
-  const [confirmPassword, setConfirmPassword] = useState('')
-  const [usernameEditValue, setUsernameEditValue] = useState('')
+const [draftName, setDraftName] = useState('')
+const [password, setPassword] = useState('')
+const [confirmPassword, setConfirmPassword] = useState('')
+const [selectedLevel, setSelectedLevel] = useState('200')
+const [usernameEditValue, setUsernameEditValue] = useState('')
   const [isEditingUsername, setIsEditingUsername] = useState(false)
   const [friends, setFriends] = useState<string[]>([])
   const [incomingRequests, setIncomingRequests] = useState<string[]>([])
@@ -1141,15 +1178,15 @@ export function HomeShell() {
   const [selectedInviteTimeControlId, setSelectedInviteTimeControlId] = useState<string>(FRIEND_INVITE_TIME_OPTIONS[0]?.id ?? '10-2')
   const [bannerMessage, setBannerMessage] = useState<string | null>(null)
   const [toastType, setToastType] = useState<'info' | 'success' | 'error'>('info')
-  const [isStartingOnline, setIsStartingOnline] = useState(false)
-  const [isFindingOpponent, setIsFindingOpponent] = useState(false)
-  const [matchmakingRoomId, setMatchmakingRoomId] = useState<string | null>(null)
-  const [matchmakingSession, setMatchmakingSession] = useState<RoomSession | null>(null)
-  const [matchmakingStatusMessage, setMatchmakingStatusMessage] = useState<string | null>(null)
-  const [matchmakingError, setMatchmakingError] = useState<string | null>(null)
-  const [avatar, setAvatar] = useState('')
-  const [isSubmitting, setIsSubmitting] = useState(false)
-  const [storageReady, setStorageReady] = useState(false)
+   const [isStartingOnline, setIsStartingOnline] = useState(false)
+   const [isFindingOpponent, setIsFindingOpponent] = useState(false)
+   const [matchmakingRoomId, setMatchmakingRoomId] = useState<string | null>(null)
+   const [matchmakingSession, setMatchmakingSession] = useState<RoomSession | null>(null)
+   const [matchmakingStatusMessage, setMatchmakingStatusMessage] = useState<string | null>(null)
+   const [matchmakingError, setMatchmakingError] = useState<string | null>(null)
+   const [avatar, setAvatar] = useState('')
+   const [isSubmitting, setIsSubmitting] = useState(false)
+   const [storageReady, setStorageReady] = useState(false)
   const matchmakingEventSourceRef = useRef<EventSource | null>(null)
   const matchmakingTimeoutRef = useRef<number | null>(null)
   const [selectedTimeControlId, setSelectedTimeControlId] = useState<string>(ONLINE_TIME_CONTROL_DEFAULT_ID)
@@ -1479,6 +1516,33 @@ export function HomeShell() {
     setIsStartingOnline(true)
     setBannerMessage(null)
     setMatchmakingError(null)
+
+    // Check if there's an existing session to rejoin
+    const storedSessionRaw = localStorage.getItem(CHESS_SESSION_STORAGE_KEY)
+    if (storedSessionRaw) {
+      try {
+        const storedSession = JSON.parse(storedSessionRaw) as { roomId: string; session: RoomSession }
+        if (storedSession?.roomId && storedSession?.session?.token) {
+          // Try to rejoin the existing game
+          try {
+            const rejoinResponse = await rejoinRoom({ roomId: storedSession.roomId, token: storedSession.session.token })
+            // Only rejoin if game is still active or waiting
+            if (rejoinResponse.snapshot.status === 'active' || rejoinResponse.snapshot.status === 'waiting') {
+              router.push(`/online?room=${storedSession.roomId}`)
+              return
+            }
+            // Game is finished - clear session and start fresh
+            localStorage.removeItem(CHESS_SESSION_STORAGE_KEY)
+          } catch {
+            // Rejoin failed - fall through to create new game
+          }
+        }
+      } catch {
+        // Invalid stored session - clear it
+        localStorage.removeItem(CHESS_SESSION_STORAGE_KEY)
+      }
+    }
+
     try {
       const response = await createRoom({
         name: preferredName,
@@ -1711,9 +1775,9 @@ export function HomeShell() {
   const selectedTimeControlLabel =
     ONLINE_TIME_CONTROL_OPTIONS.find((option) => option.id === selectedTimeControlId)?.label ?? 'Rapid • 10+2'
 
-  const handleSubmitAuth = async () => {
+    const handleSubmitAuth = async () => {
     if (!storageReady) {
-      setBannerMessage('ذخیره‌سازی پایدار حساب کاربری روی سرور فعال نیست. لطفاً به ادمین اطلاع دهید.')
+      setBannerMessage('ذخیره‌سازی پایدار حساب کاربری روی سرور فعال نیست. لطفاً به ادمین اطلاع دهید.');
       return
     }
     const normalized = draftName.trim()
@@ -1762,6 +1826,7 @@ export function HomeShell() {
       setFriendSearchResults([])
       await loadFriendsOverview(savedName, true)
       setBannerMessage(profileMode === 'register' ? 'ثبت نام با موفقیت انجام شد.' : 'ورود با موفقیت انجام شد.')
+      
     } catch {
       setBannerMessage('خطا در ارتباط با سرور پروفایل.')
     } finally {
@@ -2070,6 +2135,8 @@ export function HomeShell() {
               onDraftNameChange={setDraftName}
               onPasswordChange={setPassword}
               onConfirmPasswordChange={setConfirmPassword}
+              selectedLevel={selectedLevel}
+              onSelectedLevelChange={setSelectedLevel}
               onSubmit={handleSubmitAuth}
               isSubmitting={isSubmitting}
               usernameEditValue={usernameEditValue}

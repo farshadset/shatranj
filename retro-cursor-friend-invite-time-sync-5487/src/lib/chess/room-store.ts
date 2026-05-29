@@ -13,7 +13,7 @@ import {
 } from './types'
 import { assertChessRuntimeSafety, getChessRuntimeConfig } from './runtime-config'
 
-type EventType = 'snapshot' | 'move' | 'room-created' | 'player-joined' | 'resigned' | 'game-over' | 'chat' | 'rematch-offer' | 'rematch-accepted'
+type EventType = 'snapshot' | 'move' | 'room-created' | 'player-joined' | 'resigned' | 'game-over' | 'chat' | 'rematch-offer' | 'rematch-accepted' | 'player-disconnected' | 'player-reconnected' | 'player-rejoined'
 
 interface RoomEvent {
   id: number
@@ -61,6 +61,10 @@ interface RoomState {
     timeControlMs: number
     incrementMs: number
   } | null
+  // Disconnect tracking
+  playerConnectionCounts: Map<string, number>   // playerId -> number of active SSE conns
+  disconnectTimers: Map<string, ReturnType<typeof setTimeout>>  // playerId -> 30s timer
+  disconnectTimerExpires: Map<string, number>  // playerId -> Unix timestamp when timer expires
 }
 
 const ROOM_ID_LENGTH = 6
@@ -108,6 +112,7 @@ const ALLOWED_CHAT_STICKERS = new Set([
   '♞',
   '♟',
 ])
+const DISCONNECT_TIMEOUT_MS = 30_000  // 30 seconds
 
 class ChessApiError extends Error {
   status: number
@@ -271,6 +276,22 @@ export class RoomStore {
       createdAt: room.createdAt,
       updatedAt: room.updatedAt,
       rematchOffer: room.rematchOffer ?? undefined,
+      // Include disconnect status for each player
+      playerDisconnected: {
+        white: (room.players.white ? (room.playerConnectionCounts.get(room.players.white.id) ?? 0) === 0 : false),
+        black: (room.players.black ? (room.playerConnectionCounts.get(room.players.black.id) ?? 0) === 0 : false),
+      },
+      // Include remaining time until disconnect timeout
+      disconnectTimerMs: {
+        white: room.players.white ? (() => {
+          const expire = room.disconnectTimerExpires.get(room.players.white.id)
+          return expire ? Math.max(0, expire - Date.now()) : null
+        })() : null,
+        black: room.players.black ? (() => {
+          const expire = room.disconnectTimerExpires.get(room.players.black.id)
+          return expire ? Math.max(0, expire - Date.now()) : null
+        })() : null,
+      },
     }
   }
 
@@ -360,6 +381,10 @@ export class RoomStore {
       createdAt: now,
       updatedAt: now,
       rematchOffer: null,
+      // Disconnect tracking initialization
+      playerConnectionCounts: new Map(),
+      disconnectTimers: new Map(),
+      disconnectTimerExpires: new Map(),
     }
 
     this.rooms.set(room.id, room)
@@ -869,6 +894,9 @@ export class RoomStore {
       createdAt: now,
       updatedAt: now,
       rematchOffer: null,
+      playerConnectionCounts: new Map(),
+      disconnectTimers: new Map(),
+      disconnectTimerExpires: new Map(),
     }
 
     this.rooms.set(newRoom.id, newRoom)
@@ -929,6 +957,161 @@ export class RoomStore {
     }
   }
 
+  /**
+   * Called when a player establishes an SSE connection.
+   * Increments the connection count. If there was a pending disconnect timer,
+   * it is cancelled (player reconnected in time).
+   */
+  onPlayerConnected(roomId: string, playerId: string): void {
+    const room = this.rooms.get(normalizeRoomId(roomId))
+    if (!room) return
+
+    const currentCount = room.playerConnectionCounts.get(playerId) ?? 0
+    // If count is already > 0, it means rejoin already incremented it - just update and return
+    if (currentCount > 0) {
+      room.updatedAt = Date.now()
+      // If the player was counting down to disconnect, cancel that timer
+      const existingTimer = room.disconnectTimers.get(playerId)
+      if (existingTimer) {
+        clearTimeout(existingTimer)
+        room.disconnectTimers.delete(playerId)
+        room.disconnectTimerExpires.delete(playerId)
+      }
+      return
+    }
+    room.playerConnectionCounts.set(playerId, currentCount + 1)
+
+    // If the player was counting down to disconnect, cancel that timer
+    const existingTimer = room.disconnectTimers.get(playerId)
+    if (existingTimer) {
+      clearTimeout(existingTimer)
+      room.disconnectTimers.delete(playerId)
+      // Notify subscribers that player reconnected
+      this.emit(room, 'player-reconnected')
+    }
+  }
+
+  /**
+   * Called when a player's SSE connection drops.
+   * Decrements the connection count. If it reaches 0 and game is active,
+   * starts a 30-second timer. When timer expires, the player loses.
+   */
+  onPlayerDisconnected(roomId: string, playerId: string): void {
+    const room = this.rooms.get(normalizeRoomId(roomId))
+    if (!room) return
+
+    const currentCount = room.playerConnectionCounts.get(playerId) ?? 0
+    const newCount = Math.max(0, currentCount - 1)
+    room.playerConnectionCounts.set(playerId, newCount)
+
+    // Only start timer if no more connections exist and game is active
+    if (newCount > 0) return
+    if (room.status !== 'active') return
+
+    const existingTimer = room.disconnectTimers.get(playerId)
+    if (existingTimer) return // Timer already running
+
+    const timer = setTimeout(() => {
+      this.handleDisconnectTimeout(room, playerId)
+    }, DISCONNECT_TIMEOUT_MS)
+
+    room.disconnectTimers.set(playerId, timer)
+    room.disconnectTimerExpires.set(playerId, Date.now() + DISCONNECT_TIMEOUT_MS)
+    room.updatedAt = Date.now()
+
+    // Notify subscribers that player disconnected
+    this.emit(room, 'player-disconnected')
+  }
+
+  /**
+   * Called when the 30-second disconnect timer expires.
+   * The disconnected player loses the game.
+   */
+  private handleDisconnectTimeout(room: RoomState, playerId: string): void {
+    // If game is no longer active, do nothing
+    if (room.status !== 'active') {
+      room.disconnectTimers.delete(playerId)
+      return
+    }
+
+    // Check if player still disconnected (no connections)
+    const connCount = room.playerConnectionCounts.get(playerId) ?? 0
+    if (connCount > 0) {
+      room.disconnectTimers.delete(playerId)
+      return
+    }
+
+    // Determine which color disconnected
+    const whitePlayer = room.players.white
+    const blackPlayer = room.players.black
+    let disconnectedColor: PlayerColor | null = null
+
+    if (whitePlayer && whitePlayer.id === playerId) {
+      disconnectedColor = 'white'
+    } else if (blackPlayer && blackPlayer.id === playerId) {
+      disconnectedColor = 'black'
+    }
+
+    if (!disconnectedColor) {
+      room.disconnectTimers.delete(playerId)
+      return
+    }
+
+    // The opponent wins
+    const winner: PlayerColor = disconnectedColor === 'white' ? 'black' : 'white'
+    room.status = 'timeout'
+    room.winner = winner
+    room.drawReason = null
+    room.activeSince = null
+    room.updatedAt = Date.now()
+    room.disconnectTimers.delete(playerId)
+
+    // Clear all disconnect timers (game over)
+    for (const [pid, t] of room.disconnectTimers) {
+      clearTimeout(t)
+    }
+    room.disconnectTimers.clear()
+
+    this.emit(room, 'game-over')
+  }
+
+  /**
+    * Rejoin a room using an existing session token.
+    * This is called when a player reconnects within the 30-second disconnect window.
+    * If the player has a pending disconnect timer, it is cancelled and they resume play.
+    */
+  rejoinRoom(input: { roomId: string; token: string }): {
+    snapshot: RoomSnapshot
+    session: SessionRecord
+  } {
+    const room = this.getRoomOrThrow(input.roomId)
+    const session = room.sessionsByToken.get(input.token)
+    if (!session) {
+      throw new ChessApiError(401, 'INVALID_TOKEN', 'Invalid player session token.')
+    }
+    const now = Date.now()
+    room.updatedAt = now
+
+    // Check if there was a pending disconnect timer and cancel it
+    // Increment connection count FIRST to prevent race condition with SSE
+    const currentCount = room.playerConnectionCounts.get(session.playerId) ?? 0
+    room.playerConnectionCounts.set(session.playerId, currentCount + 1)
+
+    const existingTimer = room.disconnectTimers.get(session.playerId)
+    if (existingTimer) {
+      clearTimeout(existingTimer)
+      room.disconnectTimers.delete(session.playerId)
+      room.disconnectTimerExpires.delete(session.playerId)
+      // Notify subscribers that player reconnected
+      this.emit(room, 'player-rejoined')
+    } else {
+      // No disconnect timer - still notify to update connection count
+      this.emit(room, 'player-reconnected')
+    }
+
+    return { snapshot: this.snapshotFor(room), session }
+  }
+
   subscribe(roomId: string, listener: (event: RoomEvent) => void): () => void {
     const room = this.getRoomOrThrow(roomId)
     room.subscribers.add(listener)
@@ -936,6 +1119,10 @@ export class RoomStore {
       room.subscribers.delete(listener)
     }
   }
+}
+
+function normalizeRoomId(roomId: string): string {
+  return roomId.trim().toUpperCase()
 }
 
 declare global {

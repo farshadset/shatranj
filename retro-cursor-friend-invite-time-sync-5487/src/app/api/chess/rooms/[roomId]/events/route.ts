@@ -11,6 +11,23 @@ export async function GET(
   try {
     const roomId = params.roomId.toUpperCase()
     const store = getRoomStore()
+
+    // Extract token from query param to know who is connecting
+    const token = request.nextUrl.searchParams.get('token') ?? ''
+    let playerId = ''
+
+    // Resolve playerId from token
+    if (token) {
+      try {
+        const session = store.getSession(roomId, token)
+        if (session) {
+          playerId = session.playerId
+        }
+      } catch {
+        // Token invalid, continue without tracking
+      }
+    }
+
     const encoder = new TextEncoder()
 
     const stream = new ReadableStream<Uint8Array>({
@@ -18,6 +35,11 @@ export async function GET(
         const send = (eventName: string, payload: unknown): void => {
           controller.enqueue(encoder.encode(`event: ${eventName}\n`))
           controller.enqueue(encoder.encode(`data: ${JSON.stringify(payload)}\n\n`))
+        }
+
+        // Notify server that this player connected
+        if (playerId) {
+          store.onPlayerConnected(roomId, playerId)
         }
 
         send('connected', { ok: true, roomId })
@@ -34,7 +56,19 @@ export async function GET(
         const close = (): void => {
           clearInterval(heartbeat)
           unsubscribe()
-          controller.close()
+          // Notify server that this player disconnected
+          if (playerId) {
+            try {
+              store.onPlayerDisconnected(roomId, playerId)
+            } catch {
+              // Room may have been cleaned up
+            }
+          }
+          try {
+            controller.close()
+          } catch {
+            // Ignore if already closed
+          }
         }
 
         request.signal.addEventListener('abort', close)
